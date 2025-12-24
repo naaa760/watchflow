@@ -161,6 +161,18 @@ async def proceed_with_pr(request: ProceedWithPullRequestRequest) -> ProceedWith
             branch=request.branch_name,
             existing_sha=existing_branch_sha,
         )
+        # Verify the branch points to the correct base
+        if existing_branch_sha != base_sha:
+            log_structured(
+                logger,
+                "branch_sha_mismatch",
+                operation="proceed_with_pr",
+                subject_ids=[repo],
+                branch=request.branch_name,
+                existing_sha=existing_branch_sha,
+                expected_sha=base_sha,
+                warning="Branch exists but points to different SHA than base branch",
+            )
     else:
         # Create new branch
         created_ref = await github_client.create_git_ref(repo, request.branch_name, base_sha, **auth_ctx)
@@ -182,6 +194,15 @@ async def proceed_with_pr(request: ProceedWithPullRequestRequest) -> ProceedWith
                     "The branch may already exist or you may not have permission to create branches."
                 ),
             )
+        log_structured(
+            logger,
+            "branch_created",
+            operation="proceed_with_pr",
+            subject_ids=[repo],
+            branch=request.branch_name,
+            base_branch=base_branch,
+            new_sha=created_ref.get("object", {}).get("sha"),
+        )
 
     file_result = await github_client.create_or_update_file(
         repo_full_name=repo,
@@ -208,6 +229,17 @@ async def proceed_with_pr(request: ProceedWithPullRequestRequest) -> ProceedWith
                 "Check server logs for detailed error information."
             ),
         )
+
+    commit_sha = (file_result.get("commit") or {}).get("sha")
+    log_structured(
+        logger,
+        "file_created",
+        operation="proceed_with_pr",
+        subject_ids=[repo],
+        branch=request.branch_name,
+        file_path=request.file_path,
+        commit_sha=commit_sha,
+    )
 
     pr = await github_client.create_pull_request(
         repo_full_name=repo,
@@ -237,16 +269,19 @@ async def proceed_with_pr(request: ProceedWithPullRequestRequest) -> ProceedWith
         )
 
     pr_url = pr.get("html_url", "")
-    if not pr_url:
+    pr_number = pr.get("number")
+    if not pr_url or not pr_number:
         log_structured(
             logger,
-            "pr_url_missing",
+            "pr_creation_incomplete",
             operation="proceed_with_pr",
             subject_ids=[repo],
             pr_data=pr,
-            error="PR created but html_url is missing",
+            pr_url=pr_url,
+            pr_number=pr_number,
+            error="PR creation response missing required fields",
         )
-        raise HTTPException(status_code=500, detail="PR was created but URL is missing")
+        raise HTTPException(status_code=500, detail="PR was created but response is incomplete")
 
     log_structured(
         logger,
